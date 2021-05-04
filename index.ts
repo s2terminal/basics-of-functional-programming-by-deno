@@ -1,8 +1,6 @@
-// TODO: any外したい
-type PrimitiveValue = number | undefined | any;
+type PrimitiveValue = number | undefined;
 type PrimitiveFunction = (arg: PrimitiveValue) => PrimitiveValue;
 type Primitives = PrimitiveValue | PrimitiveFunction;
-type Value = PrimitiveValue | ((arg: Primitives) => Primitives);
 
 // リスト7.85 恒等モナドの定義
 type IDMonad<T> = T;
@@ -10,7 +8,9 @@ type IDMonadModule<T> = {
   unit: (v: T) => IDMonad<T>,
   flatMap: (m: IDMonad<T>) => (f: (v: T) => IDMonad<T>) => IDMonad<T>
 };
-const ID: IDMonadModule<Value> = {
+// TODO: ここはanyで良いのか
+type MonadValue = any;
+const ID: IDMonadModule<MonadValue> = {
   unit: value => {
     return value;
   },
@@ -25,60 +25,74 @@ console.assert(ID.unit(1) === 1);
 
 // リスト8.2 式の代数的データ構造
 type Name = string;
-type Expression = Value; // TODO: ここどう表現したら良いのか分からない
+
+type ExpressionPattern = {
+  [key in keyof ExpressionModule]?: ReturnType<Evaluate>;
+};
+type ExpressionData = (pattern: ExpressionPattern) => Expression;
+type Match = (data: ExpressionData, pattern: ExpressionPattern) => Expression;
+
+type Value = (v: PrimitiveValue) => ExpressionData;
+type Variable = (name: Name) => ExpressionData;
+type Lambda = (variable: ReturnType<Variable>, body: ExpressionData) => ExpressionData;
+type Application = (lambda: ReturnType<Lambda>, arg: ExpressionData) => ExpressionData;
+
+type FirstClassObject = Value | Lambda;
+type Expression = Value | Variable | Lambda | Application;
+
 type ExpressionModule = {
-  match: (data: Expression, pattern: Expression) => Expression,
-  num: (v: PrimitiveValue) => Expression,
-  variable: (name: Name) => Expression,
-  lambda: (name: Expression, body: Expression) => Expression,
-  app: (lambda: Expression, arg: Expression) => Expression,
-  add: (expL: Expression, expR: Expression) => Expression
+  match: Match,
+  num: Value,
+  variable: Variable,
+  lambda: Lambda,
+  app: Application,
+  add: (expL: ReturnType<Expression>, expR: ReturnType<Expression>) => ExpressionData
 }
 
 const exp: ExpressionModule = {
-  match: (data: Expression, pattern: Expression) => {
+  match: (data, pattern) => {
     return data(pattern);
   },
-  num: (value: Value) => {
-    return (pattern: Expression) => {
+  num: (value) => {
+    return (pattern) => {
       return pattern.num(value);
     };
   },
-  variable: (name: Name) => {
-    return (pattern: Expression) => {
+  variable: (name) => {
+    return (pattern) => {
       return pattern.variable(name);
     };
   },
-  lambda: (variable: Expression, body: Expression) => {
-    return (pattern: Expression) => {
+  lambda: (variable, body) => {
+    return (pattern: ExpressionPattern) => {
       return pattern.lambda(variable, body);
     };
   },
-  app: (lambda: Expression, arg: Expression) => {
-    return (pattern: Expression) => {
+  app: (lambda, arg) => {
+    return (pattern) => {
       return pattern.app(lambda, arg);
     };
   },
 
-  add: (expL: Expression, expR: Expression) => {
-    return (pattern: Expression) => {
+  add: (expL, expR) => {
+    return (pattern) => {
       return pattern.add(expL, expR);
     }
   }
 }
 
 // リスト8.4 環境の抽象データ型
-type Environment = (name: Name) => Value;
+type Environment = (name: Name) => PrimitiveValue;
 type EnvironmentModule = {
-  empty: (name: Name) => Value,
-  lookup: (name: Name, environment: Environment) => Value,
-  extend: (name: Name, value: Value, environment: Environment) => Environment
+  empty: Environment,
+  lookup: (name: Name, environment: Environment) => ReturnType<Environment>,
+  extend: (name: Name, value: ReturnType<Environment>, environment: Environment) => Environment
 };
 const env: EnvironmentModule = {
   empty: (_variableName: Name) => {
     return undefined;
   },
-  extend: (identifier: Name, value: Value, environment: Environment) => {
+  extend: (identifier, value, environment) => {
     return (queryIdentifier) => {
       if (identifier === queryIdentifier) {
         return value;
@@ -87,7 +101,7 @@ const env: EnvironmentModule = {
       }
     }
   },
-  lookup: (variableName: Name, environment: Environment) => {
+  lookup: (variableName, environment) => {
     return environment(variableName)
   }
 }
@@ -104,8 +118,8 @@ const closureEnv = env.extend("y", 2, outerEnv);
 console.assert(env.lookup("x", closureEnv)! + env.lookup("y", closureEnv)! === 3);
 
 // リスト8.10 恒等モナド評価器の定義
-type Evaluate = (exp: Expression, env: Environment) => IDMonad<Value>;
-const evaluate: Evaluate = (anExp: Expression, environment: Environment) => {
+type Evaluate = (exp: ExpressionData, env: Environment) => IDMonad<MonadValue>;
+const evaluate: Evaluate = (anExp, environment) => {
   return exp.match(anExp, {
     num: (numericValue: Value) => {
       return ID.unit(numericValue);
@@ -113,16 +127,16 @@ const evaluate: Evaluate = (anExp: Expression, environment: Environment) => {
     variable: (name: Name) => {
       return ID.unit(env.lookup(name, environment));
     },
-    lambda: (variable: Expression, body: Expression) => {
+    lambda: (variable: ExpressionData, body: ExpressionData) => {
       return exp.match(variable, {
         variable: (name: Name) => {
-          return ID.unit((actualArg: Value) => {
+          return ID.unit((actualArg: ReturnType<Environment>) => {
             return evaluate(body, env.extend(name, actualArg, environment));
           });
         },
       });
     },
-    app: (lambda: Expression, arg: Value) => {
+    app: (lambda: ExpressionData, arg: ExpressionData) => {
       return ID.flatMap(evaluate(lambda, environment))((closure) => {
         return ID.flatMap(evaluate(arg, environment))((actualArg) => {
           return closure(actualArg);
@@ -130,7 +144,7 @@ const evaluate: Evaluate = (anExp: Expression, environment: Environment) => {
       });
     },
 
-    add: (expL: Expression, expR: Expression) => {
+    add: (expL: ExpressionData, expR: ExpressionData) => {
       return ID.flatMap(evaluate(expL, environment))((valueL) => {
         return ID.flatMap(evaluate(expR, environment))((valueR) => {
           return ID.unit(valueL + valueR);
